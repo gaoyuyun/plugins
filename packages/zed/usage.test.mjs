@@ -237,13 +237,34 @@ test("a spend at its limit holds the account until the period ends", async () =>
 })
 
 // webCookieOf takes the session as it's pasted: a bare value, the
-// zed.session pair, or a whole Cookie header off the devtools
+// zed.session pair, or a whole Cookie header off the devtools — of which
+// only the session is kept, wherever it sat in the header
 test("the web session is read as it's pasted: bare, paired, or a whole Cookie header", () => {
   expect(_internal.webCookieOf({ webCookie: "ses-123" })).toBe("zed.session=ses-123")
+  expect(_internal.webCookieOf({ webCookie: "ses+12/3==" })).toBe("zed.session=ses+12/3==")
   expect(_internal.webCookieOf({ webCookie: "zed.session=ses-123" })).toBe("zed.session=ses-123")
+  expect(_internal.webCookieOf({ webCookie: "zed.session=ses-123; __cf_bm=cf; other=a" })).toBe("zed.session=ses-123")
   expect(_internal.webCookieOf({ webCookie: "other=a; zed.session=ses-123; third=b" })).toBe("zed.session=ses-123")
   expect(_internal.webCookieOf({ webCookie: "  " })).toBe("")
   expect(_internal.webCookieOf({})).toBe("")
   expect(_internal.webCookieOf({ webCookie: "no-session-here=1; other=2" })).toBe("")
+})
+
+// the spend is the personal account's: a business organization's is zed.dev's
+// org page, which no real account has checked here, so its account carries
+// no window rather than the personal one's
+test("an account that calls the models under a business organization carries no spend window", async () => {
+  const body = JSON.parse(me("zed_business"))
+  const org = { id: "org-me", name: "Me", is_personal: false }
+  body.organizations = [{ id: "org-team", name: "Team", is_personal: false }, org]
+  const seen = []
+  globalThis.fetch = async (url) => {
+    seen.push(String(url))
+    return String(url).includes("/frontend/billing/usage") ? new Response(billing(25, 1000)) : new Response(JSON.stringify(body))
+  }
+  const hooks = await ZedAuthPlugin({ client: { auth: { set: async () => {} } } })
+  const u = await hooks.auth.usage(async () => webAuth("zed_business"))
+  expect(u).toEqual({ plan: "Business", until: "2026-10-01T00:00:00Z", signIn: "kept" })
+  expect(seen).toEqual(["https://cloud.zed.dev/client/users/me"])
 })
 

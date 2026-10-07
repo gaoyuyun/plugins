@@ -396,9 +396,8 @@ async function signedInWith(key, uid, ciphertext, systemId, webCookie) {
 }
 
 // signIn is Zed's own sign-in, run as the editor runs it. inputs, when the
-// caller asks the method's questions (OpenCode's TUI and magpie's CLI do),
-// may carry a web session for the dollar spend; a caller that passes none
-// (OpenCode's CLI) signs in without it, as before.
+// method's questions were asked, may carry a web session for the dollar
+// spend; a caller that passes none signs in without it, as before.
 async function signIn(inputs) {
   const webCookie = webCookieOf({ webCookie: inputs?.webCookie })
   const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 })
@@ -915,18 +914,19 @@ function jsonError(text, v) {
 
 // webCookieOf reads the web session the sign-in was given, if any: a bare
 // zed.session value or a whole Cookie header, kept as the Cookie header to
-// send. "" when there is none or it names nothing usable.
+// send — the session alone, whatever else the header carried. "" when
+// there is none or it names nothing usable.
 function webCookieOf(auth) {
   const v = typeof auth?.webCookie === "string" ? auth.webCookie.trim() : ""
   if (!v) return ""
-  if (/^zed\.session=/.test(v)) return v
-  // a whole Cookie header: keep the session cookie out of it, alone
+  // a whole Cookie header: keep the session cookie out of it, alone (the
+  // session may come first, so the header starts with its pair)
   for (const part of v.split(";")) {
     const [name, ...rest] = part.split("=")
     if (name.trim() === "zed.session" && rest.length) return `zed.session=${rest.join("=").trim()}`
   }
-  // a bare value (no zed.session= in it at all)
-  if (!v.includes("=") || /^[\w.-]+$/.test(v)) return `zed.session=${v}`
+  // a bare value, with or without base64's padding
+  if (/^[\w./+=-]+$/.test(v)) return `zed.session=${v}`
   return ""
 }
 
@@ -942,11 +942,22 @@ function webCookieOf(auth) {
 // read that failed carries no window at all, so the card and the routing
 // are as they were — never an error of the account's own: the editor
 // sign-in is a separate one, and it stays fine.
-async function billingUsage(cookie) {
-  if (!cookie) return null
+// personal says whether the account calls the models under its own
+// organization: /frontend/billing/usage is the personal account's spend;
+// a business organization's is another page, which this reads only with a
+// real account to check it against — an org account carries no window.
+function billingUrl(me, org) {
+  const orgs = Array.isArray(me?.organizations) ? me.organizations : []
+  const mine = orgs.find((o) => o?.id === org) ?? orgs.find((o) => o?.is_personal) ?? orgs[0]
+  if (mine && mine.is_personal === false) return null
+  return CLOUD + "/frontend/billing/usage"
+}
+
+async function billingUsage(cookie, url) {
+  if (!cookie || !url) return null
   let res
   try {
-    res = await fetch(CLOUD + "/frontend/billing/usage", {
+    res = await fetch(url, {
       headers: { Cookie: cookie, Accept: "application/json", "User-Agent": userAgent() },
       signal: AbortSignal.timeout(15_000),
     })
@@ -1004,8 +1015,11 @@ async function usage(auth, save) {
   if (typeof end === "string" && RFC3339.test(end) && !isNaN(Date.parse(end))) out.until = end
   if (me.plan?.has_overdue_invoices) out.error = "Zed: this account has an overdue invoice, so its models are paused (see zed.dev/account)"
   // the dollar spend, when a web session was given at the sign-in: the
-  // account's allowance, its period ending with the plan's own
-  const web = await billingUsage(webCookieOf(auth))
+  // account's allowance, its period ending with the plan's own. A business
+  // organization's spend is zed.dev's org page, which no real account has
+  // checked here — its account carries no window rather than the
+  // personal one's.
+  const web = await billingUsage(webCookieOf(auth), billingUrl(me, s.org || orgOf(me)))
   if (web) {
     out.windows = [web]
     // when the period ends, so does the window: magpie then holds the
@@ -1065,7 +1079,7 @@ export async function ZedAuthPlugin({ client } = {}) {
           // zed.dev, signed in as the same account.
           prompts: [
             {
-              type: "input",
+              type: "text",
               key: "webCookie",
               message: "Web session for dollar usage (optional — press Enter to skip)",
               placeholder: "zed.session=… (zed.dev in your browser → devtools → Network → any request → Cookie)",
